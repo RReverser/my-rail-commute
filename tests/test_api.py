@@ -175,7 +175,7 @@ class TestGetDepartureBoard:
         """Test successful departure board retrieval."""
         with aioresponses() as mock:
             mock.get(
-                f"{API_BASE_URL}/GetDepBoardWithDetails/PAD?filterCrs=RDG&timeWindow=60&numRows=10",
+                f"{API_BASE_URL}/GetArrDepBoardWithDetails/PAD?filterCrs=RDG&timeWindow=60&numRows=10",
                 payload=departure_board_response,
                 status=200,
             )
@@ -191,7 +191,7 @@ class TestGetDepartureBoard:
         """Test that station codes are converted to uppercase."""
         with aioresponses() as mock:
             mock.get(
-                f"{API_BASE_URL}/GetDepBoardWithDetails/PAD?filterCrs=RDG&timeWindow=60&numRows=10",
+                f"{API_BASE_URL}/GetArrDepBoardWithDetails/PAD?filterCrs=RDG&timeWindow=60&numRows=10",
                 payload={"GetStationBoardResult": {"locationName": "Test", "trainServices": []}},
                 status=200,
             )
@@ -203,7 +203,7 @@ class TestGetDepartureBoard:
         """Test departure board with custom parameters."""
         with aioresponses() as mock:
             mock.get(
-                f"{API_BASE_URL}/GetDepBoardWithDetails/PAD?filterCrs=RDG&timeWindow=120&numRows=5",
+                f"{API_BASE_URL}/GetArrDepBoardWithDetails/PAD?filterCrs=RDG&timeWindow=120&numRows=5",
                 payload={"GetStationBoardResult": {"locationName": "Test", "trainServices": []}},
                 status=200,
             )
@@ -215,7 +215,7 @@ class TestGetDepartureBoard:
         """Test departure board with invalid station."""
         with aioresponses() as mock:
             mock.get(
-                f"{API_BASE_URL}/GetDepBoardWithDetails/XYZ?filterCrs=RDG&timeWindow=60&numRows=10",
+                f"{API_BASE_URL}/GetArrDepBoardWithDetails/XYZ?filterCrs=RDG&timeWindow=60&numRows=10",
                 status=404,
             )
 
@@ -226,7 +226,7 @@ class TestGetDepartureBoard:
         """Test departure board with 400 bad request (invalid CRS code)."""
         with aioresponses() as mock:
             mock.get(
-                f"{API_BASE_URL}/GetDepBoardWithDetails/PAS?filterCrs=RDG&timeWindow=60&numRows=10",
+                f"{API_BASE_URL}/GetArrDepBoardWithDetails/PAS?filterCrs=RDG&timeWindow=60&numRows=10",
                 status=400,
             )
 
@@ -237,7 +237,7 @@ class TestGetDepartureBoard:
         """Test departure board raises NationalRailAPIError when API returns invalid JSON."""
         with aioresponses() as mock:
             mock.get(
-                f"{API_BASE_URL}/GetDepBoardWithDetails/PAD?filterCrs=WAT&timeWindow=60&numRows=10",
+                f"{API_BASE_URL}/GetArrDepBoardWithDetails/PAD?filterCrs=WAT&timeWindow=60&numRows=10",
                 status=200,
                 body="<html>Bad Gateway</html>",
                 content_type="text/html",
@@ -366,7 +366,46 @@ class TestParseService:
         result = api_client._parse_service(service_data, destination_crs="LBG")
 
         assert result["scheduled_arrival"] == "08:45"
-        assert result["estimated_arrival"] == "On time"
+        # "On time" is a status word, not a clock time: estimated_arrival
+        # normalizes to the scheduled arrival (mirrors expected_departure).
+        assert result["estimated_arrival"] == "08:45"
+
+    async def test_parse_service_keeps_real_estimated_arrival_when_delayed(self, api_client):
+        """A real ``et`` clock time at the destination is preserved as estimated_arrival."""
+        service_data = {
+            "std": "08:32",
+            "etd": "08:40",
+            "platform": "3",
+            "operator": "Thameslink",
+            "serviceID": "service_delayed",
+            "destination": [{"locationName": "Cannon Street", "crs": "CST"}],
+            "subsequentCallingPoints": [
+                {
+                    "callingPoint": [
+                        {"locationName": "London Bridge", "crs": "LBG", "st": "08:45", "et": "08:51"},
+                    ]
+                }
+            ],
+        }
+
+        result = api_client._parse_service(service_data, destination_crs="LBG")
+
+        assert result["scheduled_arrival"] == "08:45"
+        assert result["estimated_arrival"] == "08:51"
+
+    async def test_parse_service_drops_arrival_only_service(self, api_client):
+        """A terminating service (sta/eta but no std) is not a boardable departure."""
+        service_data = {
+            "sta": "08:40",
+            "eta": "On time",
+            "platform": "1",
+            "operator": "GWR",
+            "serviceID": "service_terminating",
+            "origin": [{"locationName": "Bristol", "crs": "BRI"}],
+            "destination": [{"locationName": "London Paddington", "crs": "PAD"}],
+        }
+
+        assert api_client._parse_service(service_data) is None
 
     async def test_parse_service_falls_back_to_last_point_when_no_destination_crs(self, api_client):
         """Test that scheduled_arrival falls back to the last calling point when no destination_crs given."""

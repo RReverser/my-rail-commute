@@ -368,8 +368,15 @@ class NationalRailAPI:
             num_rows,
         )
 
+        # Use the combined arrivals+departures board. It is a strict superset
+        # of GetDepBoardWithDetails (same product/key): every service still
+        # carries std/etd plus subsequentCallingPoints, and additionally
+        # exposes sta/eta. A single call therefore drives both the departure
+        # and the arrival information the integration surfaces, with no extra
+        # requests. With ``filterCrs`` (filterType defaults to "to") the result
+        # is the same set of boardable services as the departures board.
         # Use path parameters for the CRS code and query parameters for filters
-        endpoint = f"GetDepBoardWithDetails/{origin_crs.upper()}"
+        endpoint = f"GetArrDepBoardWithDetails/{origin_crs.upper()}"
         params: dict[str, Any] = {
             "timeWindow": time_window,
             "numRows": num_rows,
@@ -435,6 +442,15 @@ class NationalRailAPI:
             # Basic service info
             std = service.get("std", "")  # Scheduled departure
             etd = service.get("etd", "")  # Estimated departure
+
+            # The combined arr/dep board can include services that only arrive
+            # at the watched station (terminating trains have sta/eta but no
+            # std). Those aren't boardable departures, so drop them — this keeps
+            # the unfiltered "all departures" view identical to the old
+            # departures-only board. Filtered (filterType=to) queries never
+            # return arrival-only services, so this is a no-op there.
+            if not std:
+                return None
             platform = service.get("platform", "")
             operator_name = service.get("operator", service.get("operatorName", ""))
             service_id = service.get("serviceID", service.get("serviceIdUrlSafe", ""))
@@ -511,6 +527,14 @@ class NationalRailAPI:
                 if dest_point:
                     scheduled_arrival = dest_point.get("st")
                     estimated_arrival = dest_point.get("et")
+                    # The calling point's ``et`` may be a status word
+                    # ("On time", "Delayed", "Cancelled") rather than a clock
+                    # time. Mirror the departure side (expected_departure) and
+                    # only keep it when it is an actual time; otherwise drop it
+                    # so the ``estimated_arrival or scheduled_arrival`` fallback
+                    # below always yields a usable arrival time.
+                    if not estimated_arrival or not _TIME_FORMAT_RE.match(estimated_arrival):
+                        estimated_arrival = None
 
             return {
                 "scheduled_departure": std,
