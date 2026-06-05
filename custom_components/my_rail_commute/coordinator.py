@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta
 import logging
 import re
+from datetime import datetime, timedelta
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -16,6 +16,7 @@ from .const import (
     CONF_ALL_DEPARTURES,
     CONF_DEPARTED_TRAIN_GRACE_PERIOD,
     CONF_DESTINATION,
+    CONF_DISRUPTION_MULTIPLE_COUNT,
     CONF_DISRUPTION_MULTIPLE_DELAY,
     CONF_DISRUPTION_SINGLE_DELAY,
     CONF_MAJOR_DELAY_THRESHOLD,
@@ -25,12 +26,10 @@ from .const import (
     CONF_ORIGIN,
     CONF_SEVERE_DELAY_THRESHOLD,
     CONF_TIME_WINDOW,
-    CONF_TRACK_ARRIVALS,
     DEFAULT_DEPARTED_TRAIN_GRACE_PERIOD,
     DEFAULT_MAJOR_DELAY_THRESHOLD,
     DEFAULT_MINOR_DELAY_THRESHOLD,
     DEFAULT_SEVERE_DELAY_THRESHOLD,
-    DEFAULT_TRACK_ARRIVALS,
     DOMAIN,
     MIN_DELAY_THRESHOLD,
     NIGHT_HOURS,
@@ -79,14 +78,6 @@ class NationalRailDataUpdateCoordinator(DataUpdateCoordinator):
         self.origin = config[CONF_ORIGIN]
         self.destination = config.get(CONF_DESTINATION)  # None when all_departures=True
         self.all_departures = config.get(CONF_ALL_DEPARTURES, False)
-        # Arrivals mode flips the API call: instead of departures from
-        # ``origin`` toward ``destination``, we fetch arrivals at
-        # ``destination`` filtered by trains that came from ``origin``.
-        # Disallowed alongside all-departures (the all-departures fan-out
-        # only makes sense for departure boards).
-        self.track_arrivals = bool(
-            config.get(CONF_TRACK_ARRIVALS, DEFAULT_TRACK_ARRIVALS)
-        ) and not self.all_departures
         self.time_window = int(config[CONF_TIME_WINDOW])
         self.num_services = int(config[CONF_NUM_SERVICES])
         self.night_updates_enabled = config.get(CONF_NIGHT_UPDATES, False)
@@ -202,38 +193,25 @@ class NationalRailDataUpdateCoordinator(DataUpdateCoordinator):
 
         try:
             _LOGGER.debug(
-                "Fetching %s data for %s %s %s",
-                "arrival" if self.track_arrivals else "departure",
+                "Fetching departure data for %s -> %s",
                 self.origin,
-                "<-" if self.track_arrivals else "->",
                 self.destination or "ALL",
             )
 
             # When showing all departures, fetch enough rows to populate multiple destinations
             num_rows = max(self.num_services, 20) if self.all_departures else self.num_services
 
-            if self.track_arrivals:
-                # Watch station is the destination (where the user disembarks);
-                # filter by origin (where the train started its journey).
-                data = await self.api.get_arrival_board(
-                    self.destination,
-                    origin_crs=self.origin,
-                    time_window=self.time_window,
-                    num_rows=num_rows,
-                )
-                # The board's ``location_name`` is the watched station, which
-                # in arrivals mode is the destination of the user's commute.
-                self.destination_name = data.get("location_name", self.destination)
-                self.origin_name = data.get("origin_name", self.origin)
-            else:
-                data = await self.api.get_departure_board(
-                    self.origin,
-                    destination_crs=self.destination,
-                    time_window=self.time_window,
-                    num_rows=num_rows,
-                )
-                self.origin_name = data.get("location_name", self.origin)
-                self.destination_name = data.get("destination_name", self.destination)
+            # Fetch departure board
+            data = await self.api.get_departure_board(
+                self.origin,
+                destination_crs=self.destination,
+                time_window=self.time_window,
+                num_rows=num_rows,
+            )
+
+            # Store station names
+            self.origin_name = data.get("location_name", self.origin)
+            self.destination_name = data.get("destination_name", self.destination)
 
             # Parse and enrich data
             parsed_data = self._parse_data(data)
@@ -294,17 +272,13 @@ class NationalRailDataUpdateCoordinator(DataUpdateCoordinator):
             raise UpdateFailed(f"Failed to fetch data: {err}") from err
 
     def _filter_departed_trains(self, services: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Filter out trains that have already left the watched timeline.
-
-        In departures mode that means trains that have already departed the
-        origin. In arrivals mode it means trains that have already arrived
-        at the destination — the equivalent "already gone past" check.
+        """Filter out trains that have already departed.
 
         Args:
             services: List of service data
 
         Returns:
-            Filtered list containing only trains still in the future
+            Filtered list containing only trains that haven't departed yet
         """
         if not services:
             return services
@@ -313,29 +287,17 @@ class NationalRailDataUpdateCoordinator(DataUpdateCoordinator):
         current_time_str = now.strftime("%H:%M")
         filtered_services = []
 
-        # In arrivals mode the relevant timestamp is the arrival at our station,
-        # not the departure from elsewhere.
-        if self.track_arrivals:
-            primary_key = "estimated_arrival"
-            fallback_key = "scheduled_arrival"
-        else:
-            primary_key = "expected_departure"
-            fallback_key = "scheduled_departure"
-
         for service in services:
             # Skip cancelled trains - they should be shown regardless of time
             if service.get("is_cancelled", False):
                 filtered_services.append(service)
                 continue
 
-            # An explicit primary timestamp wins even when invalid; only fall
-            # through to the scheduled value when the primary key is missing
-            # entirely. This keeps services with unparseable estimates in the
-            # list (so the regex check below can keep them visible).
-            if primary_key in service:
-                departure_time = service[primary_key]
+            # Get departure time (prefer expected, fallback to scheduled)
+            if "expected_departure" in service:
+                departure_time = service["expected_departure"]
             else:
-                departure_time = service.get(fallback_key)
+                departure_time = service.get("scheduled_departure")
 
             if not departure_time or not _TIME_FORMAT_RE.match(departure_time):
                 # If we can't parse the time, keep the service

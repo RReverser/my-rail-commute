@@ -7,13 +7,14 @@ import math
 from pathlib import Path
 from typing import Any
 
+import voluptuous as vol
+
 from homeassistant import config_entries
 from homeassistant.const import CONF_API_KEY
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-import voluptuous as vol
 
 from .api import (
     AuthenticationError,
@@ -27,6 +28,7 @@ from .const import (
     CONF_COMMUTE_NAME,
     CONF_DEPARTED_TRAIN_GRACE_PERIOD,
     CONF_DESTINATION,
+    CONF_DISRUPTION_MULTIPLE_COUNT,
     CONF_DISRUPTION_MULTIPLE_DELAY,
     CONF_DISRUPTION_SINGLE_DELAY,
     CONF_MAJOR_DELAY_THRESHOLD,
@@ -36,7 +38,6 @@ from .const import (
     CONF_ORIGIN,
     CONF_SEVERE_DELAY_THRESHOLD,
     CONF_TIME_WINDOW,
-    CONF_TRACK_ARRIVALS,
     DEFAULT_DEPARTED_TRAIN_GRACE_PERIOD,
     DEFAULT_MAJOR_DELAY_THRESHOLD,
     DEFAULT_MINOR_DELAY_THRESHOLD,
@@ -45,7 +46,6 @@ from .const import (
     DEFAULT_NUM_SERVICES,
     DEFAULT_SEVERE_DELAY_THRESHOLD,
     DEFAULT_TIME_WINDOW,
-    DEFAULT_TRACK_ARRIVALS,
     DOMAIN,
     LOCATION_SEARCH_MAX_RADIUS_MILES,
     LOCATION_SEARCH_MIN_RADIUS_MILES,
@@ -555,11 +555,9 @@ class NationalRailCommuteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         Returns:
             FlowResult for creating entry
         """
-        # Either a departures-mode or arrivals-mode reverse entry already
-        # covers this homeward leg — don't offer to add another.
-        reverse_base = f"{self._destination}_{self._origin}"
+        reverse_unique_id = f"{self._destination}_{self._origin}"
         reverse_exists = any(
-            entry.unique_id in (reverse_base, f"{reverse_base}_arr")
+            entry.unique_id == reverse_unique_id
             for entry in self._async_current_entries()
         )
 
@@ -568,11 +566,6 @@ class NationalRailCommuteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             if user_input.get(CONF_ADD_RETURN_JOURNEY, False):
-                # Track the return leg as arrivals at the user's home station
-                # by default — that's the typical homeward use case (knowing
-                # when the next train is due in), and matches what the form
-                # offers. The user can untick to keep departures-from-work.
-                track_arrivals = user_input.get(CONF_TRACK_ARRIVALS, True)
                 self.hass.async_create_task(
                     self.hass.config_entries.flow.async_init(
                         DOMAIN,
@@ -589,7 +582,6 @@ class NationalRailCommuteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             CONF_MAJOR_DELAY_THRESHOLD: self._major_delay_threshold,
                             CONF_MINOR_DELAY_THRESHOLD: self._minor_delay_threshold,
                             CONF_DEPARTED_TRAIN_GRACE_PERIOD: self._departed_train_grace_period,
-                            CONF_TRACK_ARRIVALS: track_arrivals,
                         },
                     )
                 )
@@ -600,7 +592,6 @@ class NationalRailCommuteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema=vol.Schema(
                 {
                     vol.Required(CONF_ADD_RETURN_JOURNEY, default=True): selector.BooleanSelector(),
-                    vol.Required(CONF_TRACK_ARRIVALS, default=True): selector.BooleanSelector(),
                 }
             ),
             description_placeholders={
@@ -623,14 +614,8 @@ class NationalRailCommuteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         Returns:
             FlowResult creating the entry, or aborting if already configured
         """
-        # Unique ID distinguishes a route in arrivals mode from the same
-        # CRS pair in departures mode — both can coexist if the user wants
-        # to compare them side-by-side.
-        suffix = (
-            "_arr" if user_input.get(CONF_TRACK_ARRIVALS, DEFAULT_TRACK_ARRIVALS) else ""
-        )
         await self.async_set_unique_id(
-            f"{user_input[CONF_ORIGIN]}_{user_input[CONF_DESTINATION]}{suffix}"
+            f"{user_input[CONF_ORIGIN]}_{user_input[CONF_DESTINATION]}"
         )
         self._abort_if_unique_id_configured()
         return self.async_create_entry(
@@ -652,7 +637,6 @@ class NationalRailCommuteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             CONF_MAJOR_DELAY_THRESHOLD: self._major_delay_threshold,
             CONF_MINOR_DELAY_THRESHOLD: self._minor_delay_threshold,
             CONF_DEPARTED_TRAIN_GRACE_PERIOD: self._departed_train_grace_period,
-            CONF_TRACK_ARRIVALS: DEFAULT_TRACK_ARRIVALS,
         }
         if self._destination:
             data[CONF_DESTINATION] = self._destination

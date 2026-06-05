@@ -4,12 +4,14 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator, Generator
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
-from homeassistant.const import CONF_API_KEY
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+from homeassistant.const import CONF_API_KEY
+from homeassistant.core import HomeAssistant
 
 from custom_components.my_rail_commute.const import (
     CONF_COMMUTE_NAME,
@@ -80,7 +82,7 @@ def mock_api_client_fixture() -> Generator[AsyncMock]:
 
 
 @pytest.fixture(scope="function")
-async def aiohttp_session() -> AsyncGenerator[aiohttp.ClientSession]:
+async def aiohttp_session() -> AsyncGenerator[aiohttp.ClientSession, None]:
     """Create a real aiohttp session for testing."""
     import asyncio
 
@@ -209,12 +211,6 @@ def station_validation_response_fixture() -> dict:
             "trainServices": [],
         }
     }
-
-
-@pytest.fixture(name="arrival_board_response")
-def arrival_board_response_fixture() -> dict:
-    """Return a sample arrival board API response (HSL <- WAT)."""
-    return load_json_fixture("arrival_board_on_time.json")
 
 
 @pytest.fixture(name="empty_departure_board_response")
