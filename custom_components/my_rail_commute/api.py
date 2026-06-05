@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 import asyncio
-import logging
-import re
 from collections import deque
 from datetime import datetime, timedelta
+import logging
+import re
 from typing import Any
 
 import aiohttp
@@ -306,7 +306,7 @@ class NationalRailAPI:
 
                     return data
 
-        except asyncio.TimeoutError as err:
+        except TimeoutError as err:
             if retry_count < max_retries:
                 wait_time = 2 ** retry_count
                 _LOGGER.warning(
@@ -384,6 +384,63 @@ class NationalRailAPI:
             raise
         except NationalRailAPIError as err:
             _LOGGER.error("Failed to get departure board: %s", err)
+            raise
+
+    async def get_arrival_board(
+        self,
+        destination_crs: str,
+        origin_crs: str | None = None,
+        time_window: int = 60,
+        num_rows: int = 10,
+    ) -> dict[str, Any]:
+        """Get arrival board for a route.
+
+        Mirrors get_departure_board() but queries trains arriving at
+        ``destination_crs``, optionally filtered by the train's origin
+        ``origin_crs``. Output uses the same shape as get_departure_board so
+        the coordinator and sensors stay direction-agnostic — ``scheduled_*``
+        / ``expected_*`` fields refer to the watched (destination) station's
+        arrival time.
+
+        Args:
+            destination_crs: Station to watch arrivals at (3 letters)
+            origin_crs: Optional origin station CRS to filter by
+            time_window: Time window in minutes
+            num_rows: Number of services to retrieve
+
+        Returns:
+            Arrival board data with services
+
+        Raises:
+            InvalidStationError: If station codes are invalid
+            NationalRailAPIError: For other API errors
+        """
+        _LOGGER.debug(
+            "Fetching arrival board: %s <- %s (window: %s mins, rows: %s)",
+            destination_crs,
+            origin_crs or "ALL",
+            time_window,
+            num_rows,
+        )
+
+        endpoint = f"GetArrBoardWithDetails/{destination_crs.upper()}"
+        params: dict[str, Any] = {
+            "timeWindow": time_window,
+            "numRows": num_rows,
+        }
+        if origin_crs:
+            params["filterCrs"] = origin_crs.upper()
+            # filterType=from restricts to services whose journey originates
+            # (or has previously called) at the filter station.
+            params["filterType"] = "from"
+
+        try:
+            data = await self._request(endpoint, params)
+            return self._parse_arrival_board(data, origin_crs)
+        except InvalidStationError:
+            raise
+        except NationalRailAPIError as err:
+            _LOGGER.error("Failed to get arrival board: %s", err)
             raise
 
     def _parse_departure_board(self, data: dict[str, Any], destination_crs: str | None = None) -> dict[str, Any]:
@@ -530,6 +587,191 @@ class NationalRailAPI:
             }
         except Exception as err:
             _LOGGER.error("Error parsing service: %s", err)
+            return None
+
+    def _parse_arrival_board(
+        self, data: dict[str, Any], origin_crs: str | None = None
+    ) -> dict[str, Any]:
+        """Parse arrival board response.
+
+        The board's ``locationName`` is the watched (arrival) station; we
+        expose it as ``location_name`` so the coordinator can store it as
+        ``destination_name`` (the place trains arrive at). The filter
+        station — when supplied — is the train's origin, exposed as
+        ``origin_name``.
+
+        Args:
+            data: Raw API response
+            origin_crs: Origin filter CRS used in the request, if any
+
+        Returns:
+            Parsed arrival board data
+        """
+        board = data.get("GetStationBoardResult", data)
+
+        location_name = board.get("locationName", "Unknown")
+        origin_name = board.get("filterLocationName") or None
+
+        train_services = board.get("trainServices", {})
+        services_list = (
+            train_services
+            if isinstance(train_services, list)
+            else train_services.get("service", [])
+        )
+
+        if not isinstance(services_list, list):
+            services_list = [services_list] if services_list else []
+
+        parsed_services = []
+        for service in services_list:
+            parsed_service = self._parse_arrival_service(service, origin_crs)
+            if parsed_service:
+                parsed_services.append(parsed_service)
+
+        return {
+            "location_name": location_name,
+            "origin_name": origin_name,
+            "services": parsed_services,
+            "generated_at": board.get("generatedAt"),
+            "nrcc_messages": board.get("nrccMessages", []),
+        }
+
+    def _parse_arrival_service(
+        self, service: dict[str, Any], origin_crs: str | None = None
+    ) -> dict[str, Any] | None:
+        """Parse a single arriving train service.
+
+        Returns the same shape as ``_parse_service`` so downstream code is
+        direction-agnostic. ``scheduled_departure``/``expected_departure``
+        refer to the train leaving the supplied ``origin_crs`` (taken from
+        ``previousCallingPoints``); ``scheduled_arrival``/
+        ``estimated_arrival`` refer to its arrival at the watched station.
+
+        Args:
+            service: Raw service data
+            origin_crs: Filter origin CRS used in the request, if any
+
+        Returns:
+            Parsed service data or None if invalid
+        """
+        try:
+            # Arrival at the watched station
+            sta = service.get("sta", "")
+            eta = service.get("eta", "")
+            platform = service.get("platform", "")
+            operator_name = service.get("operator", service.get("operatorName", ""))
+            service_id = service.get("serviceID", service.get("serviceIdUrlSafe", ""))
+
+            is_cancelled = eta.lower() in ["cancelled", "canceled"]
+            status = STATUS_CANCELLED if is_cancelled else STATUS_ON_TIME
+
+            delay_minutes = 0
+            estimated_arrival: str | None = None
+
+            if not is_cancelled and eta and eta != "On time":
+                status = STATUS_DELAYED
+                estimated_arrival = eta
+                if _TIME_FORMAT_RE.match(eta) and _TIME_FORMAT_RE.match(sta):
+                    try:
+                        sta_time = datetime.strptime(f"2000-01-01 {sta}", "%Y-%m-%d %H:%M")
+                        eta_time = datetime.strptime(f"2000-01-01 {eta}", "%Y-%m-%d %H:%M")
+
+                        time_diff_seconds = (eta_time - sta_time).total_seconds()
+
+                        if time_diff_seconds < -12 * 3600:
+                            eta_time += timedelta(days=1)
+                        elif time_diff_seconds > 12 * 3600:
+                            eta_time -= timedelta(days=1)
+
+                        delay_minutes = int((eta_time - sta_time).total_seconds() / 60)
+                    except ValueError:
+                        pass
+
+            cancel_reason = service.get("cancelReason", service.get("delayReason"))
+            delay_reason = service.get("delayReason")
+
+            # The arrival board reports the train's overall origin; we keep it
+            # as ``origin`` so attributes mirror what a departure entry would
+            # carry for the equivalent end of the journey.
+            origin_field = service.get("origin", [])
+            if isinstance(origin_field, list) and origin_field:
+                origin_name = origin_field[0].get("locationName", "")
+            elif isinstance(origin_field, dict):
+                origin_name = origin_field.get("locationName", "")
+            else:
+                origin_name = ""
+
+            # The train's eventual terminus — useful context even on an
+            # arrival board (it may pass through and continue beyond us).
+            destination_field = service.get("destination", [])
+            if isinstance(destination_field, list) and destination_field:
+                destination_name = destination_field[0].get("locationName", "")
+            elif isinstance(destination_field, dict):
+                destination_name = destination_field.get("locationName", "")
+            else:
+                destination_name = ""
+
+            # previousCallingPoints lists the stops the train has already
+            # served before reaching us. Find the supplied origin to pull its
+            # departure time; fall back to the very first prior stop.
+            calling_points: list[str] = []
+            scheduled_departure: str | None = None
+            expected_departure_time: str | None = None
+            previous_points = service.get("previousCallingPoints", [])
+            if isinstance(previous_points, list) and previous_points:
+                calling_point_list = previous_points[0].get("callingPoint", [])
+                if not isinstance(calling_point_list, list):
+                    calling_point_list = [calling_point_list]
+
+                origin_point = None
+                filtered: list[dict[str, Any]] = []
+                # Iterate in chronological order: first item is the journey's
+                # earliest stop, last is the one just before our station.
+                for cp in calling_point_list:
+                    if not cp:
+                        continue
+                    if origin_crs and not origin_point and cp.get("crs", "").upper() == origin_crs.upper():
+                        # Once we hit the supplied origin, keep only it and
+                        # subsequent stops in the calling points list —
+                        # earlier stops are upstream of the user's journey.
+                        origin_point = cp
+                        filtered = [cp]
+                    else:
+                        filtered.append(cp)
+
+                if origin_point is None and filtered:
+                    origin_point = filtered[0]
+
+                calling_points = [cp.get("locationName", "") for cp in filtered]
+                if origin_point:
+                    scheduled_departure = origin_point.get("st")
+                    expected_departure_time = origin_point.get("et")
+
+            expected_departure_value = expected_departure_time or scheduled_departure
+
+            return {
+                "scheduled_departure": scheduled_departure,
+                "expected_departure": expected_departure_value,
+                "platform": platform,
+                "operator": operator_name,
+                "service_id": service_id,
+                "calling_points": calling_points,
+                "delay_minutes": delay_minutes,
+                "status": status,
+                "is_cancelled": is_cancelled,
+                "cancellation_reason": cancel_reason if is_cancelled else None,
+                "delay_reason": delay_reason if not is_cancelled else None,
+                "scheduled_arrival": sta,
+                "estimated_arrival": estimated_arrival or sta,
+                # ``destination`` keeps its existing meaning (the train's
+                # final terminus); arrivals additionally expose ``origin`` so
+                # cards can distinguish "where it came from" without inspecting
+                # calling points.
+                "destination": destination_name,
+                "origin": origin_name,
+            }
+        except Exception as err:
+            _LOGGER.error("Error parsing arrival service: %s", err)
             return None
 
     async def validate_station(self, crs_code: str) -> str | None:

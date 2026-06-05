@@ -19,6 +19,7 @@ CONF_MINOR_DELAY_THRESHOLD: Final = "minor_delay_threshold"
 CONF_DEPARTED_TRAIN_GRACE_PERIOD: Final = "departed_train_grace_period"
 CONF_ADD_RETURN_JOURNEY: Final = "add_return_journey"
 CONF_ALL_DEPARTURES: Final = "all_departures"
+CONF_TRACK_ARRIVALS: Final = "track_arrivals"
 
 # Legacy config keys (for migration)
 CONF_DISRUPTION_SINGLE_DELAY: Final = "disruption_single_delay"
@@ -36,6 +37,7 @@ DEFAULT_TIME_WINDOW: Final = 60
 DEFAULT_NUM_SERVICES: Final = 3
 DEFAULT_NIGHT_UPDATES: Final = False
 DEFAULT_NAME: Final = "My Rail Commute"
+DEFAULT_TRACK_ARRIVALS: Final = False
 DEFAULT_DEPARTED_TRAIN_GRACE_PERIOD: Final = 5  # minutes
 
 # Limits

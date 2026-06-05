@@ -209,6 +209,7 @@ class CommuteSummarySensor(NationalRailCommuteEntity, SensorEntity):
                 "estimated_arrival": service.get("estimated_arrival"),
                 "scheduled_arrival": service.get("scheduled_arrival"),
                 "destination": service.get("destination"),
+                "origin": service.get("origin"),
             }
 
             # Add optional fields if present
@@ -233,6 +234,7 @@ class CommuteSummarySensor(NationalRailCommuteEntity, SensorEntity):
             ATTR_CANCELLED_COUNT: data.get("cancelled_count"),
             "last_updated": data.get("last_updated"),
             "next_update": data.get("next_update"),
+            "mode": "arrivals" if getattr(self.coordinator, "track_arrivals", False) else "departures",
             "all_trains": all_trains,  # Complete train data for custom cards
         }
 
@@ -602,16 +604,22 @@ class TrainSensor(NationalRailCommuteEntity, SensorEntity):
 
         train = services[self._train_number - 1]
 
-        # Determine display time (expected or scheduled)
+        # Determine display time (expected or scheduled). In arrivals mode
+        # cards want the arrival timestamp to be the headline; in departures
+        # mode the departure timestamp. We expose BOTH unconditionally so a
+        # single card config can pick the right one off ``mode``.
         expected = train.get("expected_departure")
         scheduled = train.get("scheduled_departure")
         departure_time = expected or scheduled
+        arrival_time = train.get("estimated_arrival") or train.get("scheduled_arrival")
 
         # Build comprehensive attributes
         attributes = {
             "train_number": self._train_number,
             "total_trains": len(services),
             "departure_time": departure_time,  # Moved from state to attribute
+            "arrival_time": arrival_time,
+            "mode": "arrivals" if getattr(self.coordinator, "track_arrivals", False) else "departures",
             ATTR_SCHEDULED_DEPARTURE: train.get("scheduled_departure"),
             ATTR_EXPECTED_DEPARTURE: train.get("expected_departure"),
             ATTR_PLATFORM: train.get("platform"),
@@ -829,16 +837,22 @@ class NextTrainSensor(NationalRailCommuteEntity, SensorEntity):
 
         train = services[0]
 
-        # Determine display time (expected or scheduled)
+        # Determine display time (expected or scheduled). In arrivals mode
+        # cards want the arrival timestamp to be the headline; in departures
+        # mode the departure timestamp. We expose BOTH unconditionally so a
+        # single card config can pick the right one off ``mode``.
         expected = train.get("expected_departure")
         scheduled = train.get("scheduled_departure")
         departure_time = expected or scheduled
+        arrival_time = train.get("estimated_arrival") or train.get("scheduled_arrival")
 
         # Build comprehensive attributes (same as train_1)
         attributes = {
             "train_number": 1,
             "total_trains": len(services),
             "departure_time": departure_time,  # Moved from state to attribute
+            "arrival_time": arrival_time,
+            "mode": "arrivals" if getattr(self.coordinator, "track_arrivals", False) else "departures",
             ATTR_SCHEDULED_DEPARTURE: train.get("scheduled_departure"),
             ATTR_EXPECTED_DEPARTURE: train.get("expected_departure"),
             ATTR_PLATFORM: train.get("platform"),
